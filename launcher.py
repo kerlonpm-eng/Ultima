@@ -89,7 +89,7 @@ from PySide6.QtWidgets import (
 APP_NAME = "UltimaLauncher"
 APP_SLUG = "ultimalauncher"
 
-LAUNCHER_VERSION = "2.9.0"
+LAUNCHER_VERSION = "2.9.1"
 
 DISCORD_LARGE_IMAGE_KEY = "ultimalauncher"
 DISCORD_CLIENT_ID = "1549559299263692860"
@@ -143,6 +143,127 @@ for folder in (
     SOUND_DIR, RUST_DIR,
 ):
     folder.mkdir(parents=True, exist_ok=True)
+
+# ---- ícone do próprio launcher ----
+# O ícone do app pode estar em lugares diferentes dependendo de como
+# o launcher foi instalado (rodando da pasta de desenvolvimento, de
+# um pacote do AUR em /usr/share, de um AppImage etc.), então em vez
+# de depender de UM caminho fixo, procura em vários e usa o primeiro
+# que abrir de verdade. Se nenhum servir, quem chama cai pro texto.
+APP_ICON_NAMES = (APP_SLUG, "icon", "logo")
+APP_ICON_EXTENSIONS = (".svg", ".png", ".webp", ".ico", ".jpg")
+APP_ICON_SIZE_DIRS = (
+    "scalable", "512x512", "256x256", "128x128", "64x64", "48x48",
+)
+
+_app_icon_cache = {"loaded": False, "icon": None}
+
+
+def app_icon_search_dirs():
+    """Pastas onde o ícone do launcher pode estar, da mais
+    específica pra mais genérica. ULTIMALAUNCHER_ASSETS (variável
+    de ambiente) tem prioridade — útil pra um PKGBUILD que instala
+    os assets num lugar próprio."""
+
+    dirs = []
+
+    env_dir = os.environ.get("ULTIMALAUNCHER_ASSETS")
+    if env_dir:
+        dirs.append(Path(env_dir))
+
+    for base in (BASE_DIR, BASE_DIR.parent, APP_DIR):
+        dirs.append(base / "assets")
+        dirs.append(base)
+
+    data_home = os.environ.get("XDG_DATA_HOME") or str(
+        Path.home() / ".local" / "share"
+    )
+    data_dirs = os.environ.get("XDG_DATA_DIRS") or (
+        "/usr/local/share:/usr/share"
+    )
+
+    for share in [data_home] + data_dirs.split(":"):
+
+        if not share:
+            continue
+
+        share_path = Path(share)
+
+        dirs.append(share_path / APP_SLUG / "assets")
+        dirs.append(share_path / APP_SLUG)
+        dirs.append(share_path / "pixmaps")
+
+        for size_dir in APP_ICON_SIZE_DIRS:
+            dirs.append(share_path / "icons" / "hicolor" / size_dir / "apps")
+
+    dirs.append(Path("/opt") / APP_SLUG / "assets")
+    dirs.append(Path("/opt") / APP_SLUG)
+
+    unique = []
+    seen = set()
+
+    for directory in dirs:
+        key = str(directory)
+        if key not in seen:
+            seen.add(key)
+            unique.append(directory)
+
+    return unique
+
+
+def app_icon_candidates():
+    """Gera, em ordem de preferência, os arquivos que podem ser o
+    ícone do launcher."""
+
+    for directory in app_icon_search_dirs():
+
+        try:
+            if not directory.is_dir():
+                continue
+        except OSError:
+            continue
+
+        for name in APP_ICON_NAMES:
+            for extension in APP_ICON_EXTENSIONS:
+                candidate = directory / f"{name}{extension}"
+                try:
+                    if candidate.is_file():
+                        yield candidate
+                except OSError:
+                    continue
+
+
+def load_app_icon():
+    """Devolve um QIcon utilizável do launcher ou None. Testa se a
+    imagem realmente renderiza (um .svg sem o plugin do Qt, por
+    exemplo, abre "sem erro" mas desenha vazio) antes de aceitar, e
+    por fim tenta o tema de ícones do sistema. O resultado fica em
+    cache — precisa ser chamado depois do QApplication existir."""
+
+    if _app_icon_cache["loaded"]:
+        return _app_icon_cache["icon"]
+
+    found = None
+
+    for candidate in app_icon_candidates():
+
+        icon = QIcon(str(candidate))
+
+        if not icon.isNull() and not icon.pixmap(32, 32).isNull():
+            found = icon
+            break
+
+    if found is None:
+
+        themed = QIcon.fromTheme(APP_SLUG)
+
+        if not themed.isNull():
+            found = themed
+
+    _app_icon_cache["loaded"] = True
+    _app_icon_cache["icon"] = found
+
+    return found
 
 # ---- idiomas (i18n) ----
 # O texto-fonte do launcher é o português: tr("texto em pt") devolve o
@@ -7197,10 +7318,59 @@ class UltimaLauncher(QMainWindow):
 
         icon_path = self.settings.get("app_icon", "")
 
+        icon = None
+
         if icon_path and Path(icon_path).exists():
             icon = QIcon(icon_path)
+
+        # Sem ícone escolhido pelo usuário, usa o do próprio launcher
+        # (procurado em vários lugares — veja load_app_icon).
+        if icon is None or icon.isNull():
+            icon = load_app_icon()
+
+        if icon is not None:
             self.setWindowIcon(icon)
             QApplication.instance().setWindowIcon(icon)
+
+    def build_sidebar_title(self):
+        """Título da barra lateral: ícone do launcher + nome. Se o
+        ícone não for encontrado/aberto, cai pro título de texto
+        com o emoji, que sempre funciona."""
+
+        icon = load_app_icon()
+        pixmap = icon.pixmap(28, 28) if icon is not None else None
+
+        if pixmap is None or pixmap.isNull():
+            title = QLabel(f"🎮 {APP_NAME}")
+            title.setWordWrap(True)
+            title.setStyleSheet(
+                "QLabel { font-size: 17px; font-weight: bold; "
+                "border: none; background: transparent; }"
+            )
+            return title
+
+        container = QWidget()
+        container.setStyleSheet("background: transparent;")
+
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        logo = QLabel()
+        logo.setPixmap(pixmap)
+        logo.setFixedSize(28, 28)
+        logo.setStyleSheet("border: none; background: transparent;")
+        row.addWidget(logo)
+
+        name = QLabel(APP_NAME)
+        name.setWordWrap(True)
+        name.setStyleSheet(
+            "QLabel { font-size: 17px; font-weight: bold; "
+            "border: none; background: transparent; }"
+        )
+        row.addWidget(name, 1)
+
+        return container
 
     def setup_ui(self):
 
@@ -7225,13 +7395,7 @@ class UltimaLauncher(QMainWindow):
         sidebar_layout.setContentsMargins(14, 18, 14, 18)
         sidebar_layout.setSpacing(4)
 
-        title = QLabel(f"🎮 {APP_NAME}")
-        title.setWordWrap(True)
-        title.setStyleSheet(
-            "QLabel { font-size: 17px; font-weight: bold; "
-            "border: none; background: transparent; }"
-        )
-        sidebar_layout.addWidget(title)
+        sidebar_layout.addWidget(self.build_sidebar_title())
         sidebar_layout.addSpacing(20)
 
         self.nav_group = QButtonGroup(self)
@@ -8805,6 +8969,15 @@ class UltimaLauncher(QMainWindow):
         self.sound_manager.play("click")
 
         icon_path = self.choose_shortcut_icon()
+
+        if not icon_path:
+            # Sem ícone escolhido: usa o do próprio launcher (achado
+            # em qualquer um dos lugares de app_icon_candidates) e só
+            # então o genérico do tema.
+            icon_path = next(
+                (str(path) for path in app_icon_candidates()), "",
+            )
+
         icon_value = icon_path if icon_path else "applications-games"
 
         applications_dir = (
